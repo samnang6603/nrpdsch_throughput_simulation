@@ -1,4 +1,4 @@
-%% Simple barebone 5G NR PDSCH End-to-End simulation without DM-RS, PT-RS, HARQ, Precode
+%% Simple barebone 5G NR PDSCH End-to-End simulation without HARQ, Precode
 
 
 %% Data
@@ -23,6 +23,7 @@ numbiterr = 0;
 
 % Set Carrier Param
 carrier = nrCarrierConfig;
+info_waveform = nrOFDMInfo(carrier);
 
 % Set PDSCH Param
 pdsch = nrPDSCHConfig;
@@ -32,6 +33,18 @@ pdsch.NID = carrier.NCellID;
 [pdschIndices,pdschIndicesInfo] = nrPDSCHIndices(carrier,pdsch);
 q = 0; % single codeword transmission
 [pdsch_seq,pdsch_cinit] = nrPDSCHPRBS(pdsch.NID,pdsch.RNTI,q,pdschIndicesInfo.G); % PRBS seq for PDSCH Scrambler TS 5.2.1
+
+% Set DM-RS Param
+dmrs = pdsch.DMRS;
+dmrssym = nrPDSCHDMRS(carrier,pdsch);
+dmrsIndices = nrPDSCHDMRSIndices(carrier,pdsch);
+
+% Set PT-RS Param
+pdsch.EnablePTRS = 0;
+ptrs = pdsch.PTRS;
+ptrssym = nrPDSCHPTRS(carrier,pdsch);
+ptrsIndices = nrPDSCHPTRSIndices(carrier,pdsch);
+
 
 % Set PDSCH Resource Grid
 NTx = 1;
@@ -51,6 +64,14 @@ enc_dlsch.TargetCodeRate = targetcoderate;
 dec_dlsch = nrDLSCHDecoder; % decode
 dec_dlsch.TargetCodeRate = targetcoderate;
 dec_dlsch.TransportBlockLength = trBlkSizes;
+
+% Set Channel Model Param
+channel = nrTDLChannel;
+channel.DelayProfile = 'TDL-C';
+channel.DelaySpread = 300e-9;
+channel.MaximumDopplerShift = 50;
+channel.ChannelResponseOutput = 'ofdm-response';
+channel.SampleRate = info_waveform.SampleRate;
 
 %% Processes
 
@@ -76,11 +97,15 @@ for m = 1:numchunks
 
     % Waveform Generation
     pdschGrid(pdschIndices) = txsym;
-    [txWaveform,info_waveform] = nrOFDMModulate(carrier,pdschGrid);
+    pdschGrid(dmrsIndices) = dmrssym;
+    txWaveform = nrOFDMModulate(carrier,pdschGrid);
+
+    % Add channel
+    [rxWaveform,ofdmResponse,timingOffset] = channel(txWaveform,carrier);
 
     % Add noise
     %txsymn = awgn(txsym,SNR,'measured');
-    rxWaveform = awgn(txWaveform,SNR,'measured');
+    rxWaveform = awgn(rxWaveform,SNR,'measured');
 
     % Waveform Demodulate
     pdschGrid_hat = nrOFDMDemodulate(carrier,rxWaveform);

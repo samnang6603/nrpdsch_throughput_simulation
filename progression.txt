@@ -1,0 +1,9 @@
+1. ✅ PDSCH + DLSCH Basic (done)
+2. ✅ AWGN + No Channel (done)
+3. ✅ Fading Channel (CDL, TDL)
+4. ✅ Add DM-RS (done or in progress)
+5. 🔄 Optional: PT-RS (if using high-order QAM or phase noise sim)
+6. 🔜 Add HARQ (realistic retransmissions + buffer mgmt)
+7. 🧠 MIMO + Layered DM-RS/PT-RS
+8. ⚔️ Add RF Impairments (Phase Noise, CFO, IQ imbalance)
+9. 📶 Add Synchronization + CORESET + Full Downlink Chain
