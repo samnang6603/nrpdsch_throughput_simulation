@@ -11,7 +11,7 @@ data_len = length(xbin);
 xbin_hat = zeros(size(xbin),'like',xbin);
 
 %% Parameter Settings
-SNR = 20;
+SNR = 17.5;
 nlayers = 1;
 modulation = '16QAM';
 targetcoderate = 3/4;
@@ -41,7 +41,7 @@ pdschGrid = nrResourceGrid(carrier,NTx,OutputDataType='double');
 trBlkSizes = nrTBS(pdsch.Modulation,pdsch.NumLayers,numel(pdsch.PRBSet),pdschIndicesInfo.NREPerPRB,targetcoderate);
 chunks = data_len/trBlkSizes;
 numchunks = ceil(chunks); % or total number of transport block
-numzeropad = fix((1 - abs(chunks - floor(chunks)))*trBlkSizes);
+numzeropad = trBlkSizes - rem(data_len,trBlkSizes);
 xbin = [xbin; zeros(numzeropad,1,'int8')];
 
 % Set DLSCH Param
@@ -85,6 +85,8 @@ for m = 1:numchunks
     % Waveform Demodulate
     pdschGrid_hat = nrOFDMDemodulate(carrier,rxWaveform);
     rxsym = pdschGrid_hat(pdschIndices);
+    % Alternatively to extract rxsym, use nrExtractResources
+    rxsym1 = nrExtractResources(pdschIndices,pdschGrid_hat);
 
     % PDSCH Decode
     rxcodedTrBlocks = nrPDSCHDecode(rxsym,pdsch.Modulation,pdsch.NID,pdsch.RNTI);

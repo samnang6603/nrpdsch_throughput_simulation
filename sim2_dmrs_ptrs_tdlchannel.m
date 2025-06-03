@@ -11,15 +11,18 @@ data_len = length(xbin);
 xbin_hat = zeros(size(xbin),'like',xbin);
 
 %% Parameter Settings
-SNR = 20;
+SNR = 10;
 nlayers = 1;
 modulation = '16QAM';
-targetcoderate = 3/4;
+targetcoderate = 1/6;
 rv = 0;
 numblkerr = 0;
 numbiterr = 0;
 
 %% Parameter Configurations
+
+% Set Global Sim Param
+sim.PerfectChannelEstimator = false;
 
 % Set Carrier Param
 carrier = nrCarrierConfig;
@@ -45,16 +48,16 @@ ptrs = pdsch.PTRS;
 ptrssym = nrPDSCHPTRS(carrier,pdsch);
 ptrsIndices = nrPDSCHPTRSIndices(carrier,pdsch);
 
-
 % Set PDSCH Resource Grid
-NTx = 1;
+NTx = 1; 
+NRx = 1;
 pdschGrid = nrResourceGrid(carrier,NTx,OutputDataType='double');
 
 % Calculate Transport Block size
 trBlkSizes = nrTBS(pdsch.Modulation,pdsch.NumLayers,numel(pdsch.PRBSet),pdschIndicesInfo.NREPerPRB,targetcoderate);
 chunks = data_len/trBlkSizes;
 numchunks = ceil(chunks); % or total number of transport block
-numzeropad = fix((1 - abs(chunks - floor(chunks)))*trBlkSizes);
+numzeropad = trBlkSizes - rem(data_len,trBlkSizes);
 xbin = [xbin; zeros(numzeropad,1,'int8')];
 
 % Set DLSCH Param
@@ -72,6 +75,7 @@ channel.DelaySpread = 300e-9;
 channel.MaximumDopplerShift = 50;
 channel.ChannelResponseOutput = 'ofdm-response';
 channel.SampleRate = info_waveform.SampleRate;
+channel.NumReceiveAntennas = NRx;
 
 %% Processes
 
@@ -82,51 +86,85 @@ for m = 1:numchunks
     % DLSCH Encoding
     codedTrBlocks = enc_dlsch(pdsch.Modulation,pdsch.NumLayers,...
         pdschIndicesInfo.G,rv);
-    % Alternatively, DLSCH Encoding unfoiled
-    % codedTrBlocks1 = nrCRCEncode(xbinchunk,info_dlsch.CRC);
-    % codedTrBlocks1 = nrCodeBlockSegmentLDPC(codedTrBlocks1,info_dlsch.BGN);
-    % codedTrBlocks1 = nrLDPCEncode(codedTrBlocks1,info_dlsch.BGN);
-    % codedTrBlocks1 = nrRateMatchLDPC(codedTrBlocks1,pdschIndicesInfo.G,rv,modulation,nlayers);
 
     % PDSCH Encoding
     txsym = nrPDSCH(carrier,pdsch,codedTrBlocks); % Scramble > Modulate > LayerMap
-    % Alternatively, PDSCH Encoding unfoiled
-    % pdsch_scram_bit = mod(codedTrBlocks + int8(pdsch_seq),2); % PDSCH Scrambling TS 7.3.1.1
-    % txsym1 = nrSymbolModulate(pdsch_scram_bit,modulation,OutputDataType='double');
-    % txsym1 = nrLayerMap(pdsch_scram_bit,nlayers); % for 1 layer or 1 Tx, this does nothing but included for completeness
 
     % Waveform Generation
     pdschGrid(pdschIndices) = txsym;
-    pdschGrid(dmrsIndices) = dmrssym;
+    if ~sim.PerfectChannelEstimator
+        pdschGrid(dmrsIndices) = dmrssym;
+    end
     txWaveform = nrOFDMModulate(carrier,pdschGrid);
 
     % Add channel
     [rxWaveform,ofdmResponse,timingOffset] = channel(txWaveform,carrier);
 
+    % Alternatively if use "path-gain" as channel response output then to
+    % get "ofdm-response", use
+    % pathFilters = channel.getPathFilters; % channel1 is channel duplicate
+    % [rxWaveform1,pathGains,sampleTimes] = channel(txWaveform);
+    % ofdmResponse1 = nrPerfectChannelEstimate(carrier,pathGains,pathFilters);
+
     % Add noise
     %txsymn = awgn(txsym,SNR,'measured');
-    rxWaveform = awgn(rxWaveform,SNR,'measured');
+    %[rxWaveform, noisevar] = awgn(rxWaveform,SNR,'measured');
+    SNR_lin = 10^(SNR/10);
+    N0 = 1/sqrt(info_waveform.Nfft*SNR_lin);
+    nPowerPerRE = N0^2*info_waveform.Nfft;
+    noise = N0*randn(size(rxWaveform),'like',rxWaveform);
+    rxWaveform = rxWaveform + noise;
 
+    % Channel Estimation
+    if sim.PerfectChannelEstimator
+        offset = timingOffset;
+    else
+        offset = nrTimingEstimate(carrier,rxWaveform,pdschGrid);
+    end
+    rxWaveform = rxWaveform(1+offset:end);
+    
     % Waveform Demodulate
     pdschGrid_hat = nrOFDMDemodulate(carrier,rxWaveform);
-    rxsym = pdschGrid_hat(pdschIndices);
+    [K,L] = size(pdschGrid_hat);
+    if L < carrier.SymbolsPerSlot
+        pdschGrid_hat = [pdschGrid_hat, zeros(K,1)]; %#ok<AGROW>
+    end
+    if sim.PerfectChannelEstimator
+        % Use OFDM channel response for perfect channel estimator
+        estChannelGridAnts = ofdmResponse;
+
+        % Get noise estimation per REs (copied method directly from an
+        % example that uses perfect channel estimation
+        noiseEst = nPowerPerRE;
+       
+        % Get PDSCH resource elements from the received grid and
+        % channel estimate
+        [pdschRx,pdschHest,~,~] = nrExtractResources(pdschIndices,pdschGrid_hat,estChannelGridAnts);
+    else
+        % Use practical channel estimation
+        [estChannelGridAnts,noiseEst] = nrChannelEstimate(pdschGrid_hat,dmrsIndices,dmrssym);
+        
+        % Get PDSCH resource elements from the received grid and
+        % channel estimate
+        [pdschRx,pdschHest,~,~] = nrExtractResources(pdschIndices,pdschGrid_hat,estChannelGridAnts);
+    end
+
+    % Equalization
+    [pdschEq,csi] = nrEqualizeMMSE(pdschRx,pdschHest,noiseEst);
+    rxsym = pdschEq;
 
     % PDSCH Decode
-    rxcodedTrBlocks = nrPDSCHDecode(rxsym,pdsch.Modulation,pdsch.NID,pdsch.RNTI);
+    %rxcodedTrBlocks = nrPDSCHDecode(rxsym,pdsch.Modulation,pdsch.NID,pdsch.RNTI);
+    rxcodedTrBlocks = nrPDSCHDecode(carrier,pdsch,pdschEq,noiseEst);
     rxSoftBits = rxcodedTrBlocks{1};
-    % Alternatively, PDSCH Decoding unfoiled
-    rxsym_layer_demap = nrLayerDemap(rxsym);
-    rx_scram_bit = nrSymbolDemodulate(rxsym_layer_demap{1},modulation,'DecisionType','soft'); 
-    rx_descram_sign = 1.0 - 2.0*double(pdsch_seq);
-    rxSoftBits1 = rx_scram_bit.*rx_descram_sign; % XOR again reverse the scrambling
+
+    % Scale LLRs by CSI
+    % Qm = length(rxSoftBits)/length(rxsym);
+    % csi = repmat(csi.',Qm,1);
+    % rxSoftBits = rxSoftBits.*csi(:);
 
     % DLSCH Decode
     [xbinchunk_hat,blkerr] = dec_dlsch(rxSoftBits,pdsch.Modulation,pdsch.NumLayers,rv);
-    % Alternatively, DLSCH Decoding unfoiled
-    % xbinchunk_hat1 = nrRateRecoverLDPC(rxSoftBits,trBlkSizes,targetcoderate,rv,modulation,nlayers);
-    % xbinchunk_hat1 = nrLDPCDecode(xbinchunk_hat1,info_dlsch.BGN,6);
-    % xbinchunk_hat1 = nrCodeBlockDesegmentLDPC(xbinchunk_hat1,info_dlsch.BGN,trBlkSizes+info_dlsch.L);
-    % xbinchunk_hat1 = nrCRCDecode(xbinchunk_hat1,info_dlsch.CRC);
 
     numblkerr = numblkerr + double(blkerr);
     numbiterr = numbiterr + sum(xbinchunk~=xbinchunk_hat);
@@ -143,7 +181,7 @@ xhat = bit2int(xbin_hat,8);
 xhat = uint8(reshape(xhat,size(x)));
 figure
 set(gca,'FontSize',14)
-sgtitle('Barebone 5G NR Without DM-RS, PT-RS, HARQ')
+sgtitle('Barebone 5G NR With DM-RS, PT-RS Without HARQ')
 subplot(121)
 imshow(x), title('Transmitted'),set(gca,'FontSize',14)
 subplot(122)
