@@ -1,6 +1,8 @@
-%% Simple barebone 5G NR PDSCH End-to-End simulation without HARQ, Precode
+%% Simple barebone 5G NR PDSCH End-to-End simulation with HARQ
 % Payload > DLSCH Enc > PDSCH Enc > OFDM Mod > TDL > AWGN > OFDM Dem > 
-% > Chan Est > EQ > PDSCH Dec > DLSCH Dec > Received Payload
+% > Chan Est > EQ > PDSCH Dec > DLSCH Dec > Received Payload -+
+% ^                                                           |
+% |_________________________ HARQ ____________________________|
 
 %% Data
 clear
@@ -11,18 +13,18 @@ data_len = length(xbin);
 xbin_hat = zeros(size(xbin),'like',xbin);
 
 %% Parameter Settings
-SNR = 8;
+SNR = 5;
 nlayers = 1;
 modulation = '16QAM';
-targetcoderate = 1/6;
-rv = 0;
+targetcoderate = 1/5;
+rv = [0 2 3 1];
 numblkerr = 0;
 numbiterr = 0;
 
 %% Parameter Configurations
 
 % Set Global Sim Param
-sim.PerfectChannelEstimator = false;
+sim.PerfectChannelEstimator = true;
 
 % Set Carrier Param
 carrier = nrCarrierConfig;
@@ -64,9 +66,11 @@ xbin = [xbin; zeros(numzeropad,1,'int8')];
 info_dlsch = nrDLSCHInfo(trBlkSizes,targetcoderate);  % info
 enc_dlsch = nrDLSCH;       % encode
 enc_dlsch.TargetCodeRate = targetcoderate;
+enc_dlsch.MultipleHARQProcesses = true;
 dec_dlsch = nrDLSCHDecoder; % decode
 dec_dlsch.TargetCodeRate = targetcoderate;
 dec_dlsch.TransportBlockLength = trBlkSizes;
+dec_dlsch.MultipleHARQProcesses = true;
 
 % Set Channel Model Param
 channel = nrTDLChannel;
@@ -77,15 +81,32 @@ channel.ChannelResponseOutput = 'ofdm-response';
 channel.SampleRate = info_waveform.SampleRate;
 channel.NumReceiveAntennas = NRx;
 
-%% Processes
+% HARQ Handler
+NHARQProcesses = 16;
+harqEntity = HARQEntity(0:NHARQProcesses-1,rv,pdsch.NumCodewords);
 
+%% Processes
 for m = 1:numchunks
-    xbinchunk = xbin((m-1)*trBlkSizes+1:(m-1)*trBlkSizes+trBlkSizes);
-    setTransportBlock(enc_dlsch,xbinchunk);
+    
+    % HARQ Buffer Management
+    % Get new transport blocks and flush decoder soft buffer, as required
+    for cwIdx = 1:pdsch.NumCodewords % only 1 cw but just to show the idea
+        if harqEntity.NewData(cwIdx)
+            % Allocate new TB
+            xbinchunk = xbin((m-1)*trBlkSizes+1:(m-1)*trBlkSizes+trBlkSizes);
+            setTransportBlock(enc_dlsch,xbinchunk,cwIdx-1,harqEntity.HARQProcessID);
+            
+            % If the previous RV sequence ends without successful decoding,
+            % flush the soft buffer explicitly
+            if harqEntity.SequenceTimeout(cwIdx)
+                resetSoftBuffer(dec_dlsch,cwIdx-1,harqEntity.HARQProcessID);
+            end
+        end
+    end
 
     % DLSCH Encoding
     codedTrBlocks = enc_dlsch(pdsch.Modulation,pdsch.NumLayers,...
-        pdschIndicesInfo.G,rv);
+        pdschIndicesInfo.G,harqEntity.RedundancyVersion,harqEntity.HARQProcessID);
 
     % PDSCH Encoding
     txsym = nrPDSCH(carrier,pdsch,codedTrBlocks); % Scramble > Modulate > LayerMap
@@ -164,13 +185,21 @@ for m = 1:numchunks
     % rxSoftBits = rxSoftBits.*csi(:);
 
     % DLSCH Decode
-    [xbinchunk_hat,blkerr] = dec_dlsch(rxSoftBits,pdsch.Modulation,pdsch.NumLayers,rv);
+    [xbinchunk_hat,blkerr] = dec_dlsch(rxSoftBits,pdsch.Modulation,...
+                             pdsch.NumLayers,harqEntity.RedundancyVersion,harqEntity.HARQProcessID);
 
     numblkerr = numblkerr + double(blkerr);
     numbiterr = numbiterr + sum(xbinchunk~=xbinchunk_hat);
 
+    % HARQ Process Update
+    % Update current HARQ process with CRC error, then advance to next
+    % process. This step updates info related to the active HARQ process in
+    % the HARQ entity
+    statusReport = updateAndAdvance(harqEntity,blkerr,trBlkSizes,pdschIndicesInfo.G);
+
     xbin_hat((m-1)*trBlkSizes+1:(m-1)*trBlkSizes+trBlkSizes) = xbinchunk_hat;
 
+    fprintf("Slot %d). %s\n",m,statusReport)
 end
 bler =  numblkerr/numchunks; % Always equal to 1 for this case of simplied 5G pipeline
 ber = numbiterr/data_len;
@@ -181,7 +210,7 @@ xhat = bit2int(xbin_hat,8);
 xhat = uint8(reshape(xhat,size(x)));
 figure
 set(gca,'FontSize',14)
-sgtitle('Barebone 5G NR With DM-RS, PT-RS Without HARQ')
+sgtitle('Barebone 5G NR With DM-RS, PT-RS, HARQ')
 subplot(121)
 imshow(x), title('Transmitted'),set(gca,'FontSize',14)
 subplot(122)

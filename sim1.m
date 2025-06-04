@@ -1,5 +1,6 @@
 %% Simple barebone 5G NR PDSCH End-to-End simulation without DM-RS, PT-RS, HARQ, Precode
-
+% Payload > DLSCH Enc > PDSCH Enc > OFDM Mod > AWGN > OFDM Dem > PDSCH Dec 
+% > DLSCH Dec > Received Payload
 
 %% Data
 clear
